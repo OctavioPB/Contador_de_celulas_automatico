@@ -20,7 +20,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_APP_DIR)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-_DETECTION_MODEL = os.path.join(_PROJECT_ROOT, "Models", "model_base_3A")
+_DETECTION_MODEL = os.path.join(_PROJECT_ROOT, "Models", "model_base_3B")
 _ORIENTATION_MODEL = os.path.join(
     _PROJECT_ROOT, "Orientation", "Orientador_De_Fibras_CNN",
     "models", "cnn_fiber_orientation.pth"
@@ -186,6 +186,10 @@ class App(tb.Window):
             columns=("#", "CNN (deg)", "Feature (deg)", "Metodo"),
             widths=(45, 90, 105, 75),
         )
+        tb.Button(
+            tab_orient, text="Descargar CSV", bootstyle="success-outline",
+            command=lambda: self._export_treeview_csv(self._tv_orient, "orientacion.csv"),
+        ).pack(fill=X, pady=(4, 0))
 
         # Tab 3: Detalle
         tab_detail = tb.Frame(self._results_nb, padding=4)
@@ -195,6 +199,10 @@ class App(tb.Window):
             columns=("#", "Area (px)", "CNN (deg)", "Feat. (deg)", "Metodo"),
             widths=(40, 85, 85, 95, 70),
         )
+        tb.Button(
+            tab_detail, text="Descargar CSV", bootstyle="success-outline",
+            command=lambda: self._export_treeview_csv(self._tv_detail, "detalle.csv"),
+        ).pack(fill=X, pady=(4, 0))
 
         # Tab 4: Features
         _FEAT_COLS = ("label", "area", "perimeter", "eccentricity", "solidity",
@@ -203,6 +211,10 @@ class App(tb.Window):
         tab_features = tb.Frame(self._results_nb, padding=4)
         self._results_nb.add(tab_features, text=" Features ")
         self._tv_features = self._make_bidir_treeview(tab_features, _FEAT_COLS, _FEAT_WIDTHS)
+        tb.Button(
+            tab_features, text="Descargar CSV", bootstyle="success-outline",
+            command=lambda: self._export_treeview_csv(self._tv_features, "cell_features.csv"),
+        ).pack(fill=X, pady=(4, 0))
 
         # Botones de accion
         self._analyze_btn = tb.Button(
@@ -548,6 +560,30 @@ class App(tb.Window):
     # =========================================================================
     # Guardar y exportar
     # =========================================================================
+    def _export_treeview_csv(self, tv, default_name: str):
+        import csv
+        cols = tv["columns"]
+        rows = [tv.item(iid)["values"] for iid in tv.get_children()]
+        if not rows:
+            messagebox.showwarning("Sin datos", "No hay datos para exportar. Ejecuta el analisis primero.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Guardar CSV",
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(cols)
+                writer.writerows(rows)
+            messagebox.showinfo("Guardado", f"CSV guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error al guardar CSV", str(e))
+
     def save_analysis(self):
         content = self._analysis_cache.strip()
         if not content:
@@ -568,8 +604,7 @@ class App(tb.Window):
             messagebox.showerror("Error", str(e))
 
     def export_pdf(self):
-        content = self._analysis_cache.strip()
-        if not content:
+        if self._last_result is None:
             messagebox.showwarning("Sin contenido", "No hay analisis para exportar.")
             return
         path = filedialog.asksaveasfilename(
@@ -580,22 +615,255 @@ class App(tb.Window):
         if not path:
             return
         try:
-            c = rl_canvas.Canvas(path, pagesize=letter)
-            width, height = letter
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(50, height - 50, "Analisis de Imagen")
-            c.setFont("Helvetica", 9)
-            c.drawString(50, height - 66, f"Fecha: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            text_obj = c.beginText(50, height - 90)
-            text_obj.setFont("Courier", 8)
-            for line in content.splitlines():
-                text_obj.textLine(line)
-            c.drawText(text_obj)
-            c.showPage()
-            c.save()
+            self._build_pdf(path, self._last_result)
             messagebox.showinfo("Exportado", f"PDF generado en:\n{path}")
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error al exportar PDF", str(e))
+
+    def _build_pdf(self, path: str, result):
+        from reportlab.platypus import (
+            SimpleDocTemplate, Table, TableStyle, Paragraph,
+            Spacer, HRFlowable, PageBreak,
+        )
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.lib.units import inch
+
+        # ---- Colores corporativos ----
+        C_BLUE_DARK  = colors.HexColor("#1e3a5f")
+        C_BLUE_MID   = colors.HexColor("#2d6fa6")
+        C_BLUE_LIGHT = colors.HexColor("#dce8f5")
+        C_GRAY_ROW   = colors.HexColor("#f4f7fb")
+        C_BORDER     = colors.HexColor("#b0bfcf")
+        C_TEXT       = colors.HexColor("#1a1a2e")
+        C_GREEN      = colors.HexColor("#2e7d32")
+        C_WHITE      = colors.white
+
+        PAGE_W, PAGE_H = landscape(letter)
+        MARGIN = 0.55 * inch
+        USABLE_W = PAGE_W - 2 * MARGIN
+
+        doc = SimpleDocTemplate(
+            path,
+            pagesize=landscape(letter),
+            leftMargin=MARGIN, rightMargin=MARGIN,
+            topMargin=MARGIN, bottomMargin=MARGIN,
+            title="SmartCell AI — Reporte de Analisis",
+            author="SmartCell AI Analysis Studio",
+        )
+
+        styles = getSampleStyleSheet()
+
+        def _style(name, **kw):
+            return ParagraphStyle(name, parent=styles["Normal"], **kw)
+
+        st_title   = _style("Title",   fontSize=20, textColor=C_WHITE,      leading=26, fontName="Helvetica-Bold")
+        st_sub     = _style("Sub",     fontSize=10, textColor=C_BLUE_LIGHT,  leading=14, fontName="Helvetica")
+        st_meta    = _style("Meta",    fontSize=8,  textColor=colors.grey,   leading=11, fontName="Helvetica")
+        st_section = _style("Sec",     fontSize=12, textColor=C_BLUE_DARK,   leading=16, fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=4)
+        st_desc    = _style("Desc",    fontSize=8,  textColor=C_TEXT,        leading=12, fontName="Helvetica",      spaceAfter=6)
+        st_caption = _style("Cap",     fontSize=7,  textColor=colors.grey,   leading=10, fontName="Helvetica-Oblique", spaceAfter=10)
+
+        def _hr():
+            return HRFlowable(width="100%", thickness=1, color=C_BORDER, spaceAfter=6, spaceBefore=2)
+
+        def _tbl_style(header_bg=C_BLUE_MID, row_alt=C_GRAY_ROW):
+            return TableStyle([
+                # Encabezado
+                ("BACKGROUND",    (0, 0), (-1, 0),  header_bg),
+                ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+                ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+                ("FONTSIZE",      (0, 0), (-1, 0),  8),
+                ("TOPPADDING",    (0, 0), (-1, 0),  5),
+                ("BOTTOMPADDING", (0, 0), (-1, 0),  5),
+                ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
+                # Filas de datos
+                ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE",      (0, 1), (-1, -1), 7),
+                ("TOPPADDING",    (0, 1), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 3),
+                ("ALIGN",         (0, 1), (-1, -1), "CENTER"),
+                ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+                # Bordes
+                ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+                ("LINEBELOW",     (0, 0), (-1, 0),  1.2, C_BLUE_DARK),
+                ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_WHITE, row_alt]),
+            ])
+
+        story = []
+
+        # =====================================================================
+        # PORTADA / CABECERA
+        # =====================================================================
+        now_str = datetime.datetime.now().strftime("%d/%m/%Y  %H:%M:%S")
+        img_name = os.path.basename(self.current_image_path) if self.current_image_path else "—"
+
+        header_data = [[
+            Paragraph("SmartCell AI Analysis Studio", st_title),
+            Paragraph(f"Reporte de Análisis Celular<br/>"
+                      f"<font size='9'>{now_str}</font>", st_sub),
+        ]]
+        header_tbl = Table(header_data, colWidths=[USABLE_W * 0.62, USABLE_W * 0.38])
+        header_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), C_BLUE_DARK),
+            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING",(0, 0), (0, 0),   16),
+            ("TOPPADDING", (0, 0), (-1, -1), 14),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING",  (1, 0), (1, 0),   14),
+            ("ALIGN",      (1, 0), (1, 0),   "RIGHT"),
+        ]))
+        story.append(header_tbl)
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(f"Imagen analizada: {img_name}", st_meta))
+        story.append(_hr())
+
+        # =====================================================================
+        # SECCIÓN 1 — RESUMEN
+        # =====================================================================
+        story.append(Paragraph("1.  Resumen Ejecutivo", st_section))
+        story.append(Paragraph(
+            "El siguiente cuadro presenta los indicadores estadísticos globales obtenidos "
+            "tras el análisis de segmentación celular realizado con el modelo Cellpose "
+            "y la CNN de orientación de fibras.",
+            st_desc,
+        ))
+
+        summary_data = [
+            ["Indicador", "Valor", "Descripción"],
+            ["Total de células detectadas", str(result.count),
+             "Número de objetos segmentados por Cellpose"],
+            ["Área media", f"{result.mean_area:.1f} px²",
+             "Promedio del área (en píxeles) de todas las células"],
+            ["Desviación estándar del área", f"{result.std_area:.1f} px²",
+             "Dispersión del tamaño celular respecto a la media"],
+        ]
+        col_w = [USABLE_W * 0.32, USABLE_W * 0.18, USABLE_W * 0.50]
+        summary_tbl = Table(summary_data, colWidths=col_w, repeatRows=1, splitByRow=True)
+        summary_tbl.setStyle(TableStyle([
+            *_tbl_style(header_bg=C_BLUE_DARK)._cmds,
+            ("ALIGN", (0, 1), (0, -1), "LEFT"),
+            ("ALIGN", (2, 1), (2, -1), "LEFT"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(summary_tbl)
+        story.append(Spacer(1, 10))
+
+        # =====================================================================
+        # SECCIÓN 2 — ORIENTACIÓN
+        # =====================================================================
+        story.append(_hr())
+        story.append(Paragraph("2.  Orientación por Célula", st_section))
+        story.append(Paragraph(
+            "La columna <b>CNN (°)</b> contiene el ángulo estimado por la red neuronal "
+            "convolucional de orientación (rango 0° – 180°). "
+            "La columna <b>Feature (°)</b> corresponde al ángulo del eje mayor de la "
+            "elipse ajustada a la máscara binaria (rango −90° – 90°). "
+            "La columna <b>Método</b> indica si se usó la CNN o el fallback geométrico.",
+            st_desc,
+        ))
+
+        orient_header = ["#", "CNN (°)", "Feature (°)", "Método"]
+        orient_rows = [
+            [str(i), f"{a:.1f}", f"{f:.1f}", "Elipse" if fb else "CNN"]
+            for i, (a, f, fb) in enumerate(
+                zip(result.angles, result.feature_angles, result.used_fallback), 1
+            )
+        ]
+        n_orient = len(orient_rows)
+        orient_data = [orient_header] + orient_rows
+        col_w_o = [USABLE_W * 0.07, USABLE_W * 0.15, USABLE_W * 0.17, USABLE_W * 0.14]
+        orient_tbl = Table(orient_data, colWidths=col_w_o, repeatRows=1, splitByRow=True)
+        orient_tbl.setStyle(_tbl_style())
+        story.append(orient_tbl)
+        story.append(Paragraph(f"Total: {n_orient} células", st_caption))
+
+        # =====================================================================
+        # SECCIÓN 3 — DETALLE
+        # =====================================================================
+        story.append(_hr())
+        story.append(Paragraph("3.  Detalle por Célula", st_section))
+        story.append(Paragraph(
+            "Combina el área en píxeles con los ángulos de orientación CNN y geométrico "
+            "para facilitar la comparación individual de cada célula detectada.",
+            st_desc,
+        ))
+
+        detail_header = ["#", "Área (px²)", "CNN (°)", "Feature (°)", "Método"]
+        detail_rows = [
+            [str(i), f"{area:.0f}", f"{a:.1f}", f"{f:.1f}", "Elipse" if fb else "CNN"]
+            for i, (area, a, f, fb) in enumerate(
+                zip(result.areas, result.angles, result.feature_angles, result.used_fallback), 1
+            )
+        ]
+        detail_data = [detail_header] + detail_rows
+        col_w_d = [USABLE_W * 0.06, USABLE_W * 0.13, USABLE_W * 0.13, USABLE_W * 0.15, USABLE_W * 0.13]
+        detail_tbl = Table(detail_data, colWidths=col_w_d, repeatRows=1, splitByRow=True)
+        detail_tbl.setStyle(_tbl_style(header_bg=colors.HexColor("#1b5e20"), row_alt=colors.HexColor("#f1f8f1")))
+        story.append(detail_tbl)
+        story.append(Paragraph(f"Total: {len(detail_rows)} células", st_caption))
+
+        # =====================================================================
+        # SECCIÓN 4 — FEATURES MORFOLÓGICAS (página nueva)
+        # =====================================================================
+        story.append(PageBreak())
+        story.append(Paragraph("4.  Features Morfológicas", st_section))
+        story.append(Paragraph(
+            "Métricas calculadas sobre el <i>label map</i> de Cellpose mediante "
+            "<b>skimage.measure.regionprops</b>. "
+            "El <b>área</b> y <b>perímetro</b> se expresan en píxeles. "
+            "La <b>excentricidad</b> varía entre 0 (círculo perfecto) y 1 (elipse muy alargada). "
+            "La <b>solidez</b> es la relación entre el área de la célula y su casco convexo "
+            "(1 = forma convexa perfecta). "
+            "La <b>orientación</b> es el ángulo del eje mayor en grados respecto al eje horizontal. "
+            "Los <b>centroides</b> indican la posición del centro de masa en píxeles (x, y).",
+            st_desc,
+        ))
+
+        feat_header = ["#", "Área", "Perímetro", "Excentr.", "Solidez",
+                       "Eje Mayor", "Eje Menor", "Orient. (°)", "Centroide X", "Centroide Y"]
+        feat_rows = [
+            [
+                str(f["label"]),
+                str(f["area"]),
+                f"{f['perimeter']:.2f}",
+                f"{f['eccentricity']:.4f}",
+                f"{f['solidity']:.4f}",
+                f"{f['major_axis']:.2f}",
+                f"{f['minor_axis']:.2f}",
+                f"{f['orientation']:.2f}",
+                f"{f['centroid_x']:.2f}",
+                f"{f['centroid_y']:.2f}",
+            ]
+            for f in result.cell_features
+        ]
+        feat_data = [feat_header] + feat_rows
+        col_w_f = [USABLE_W / 10] * 10
+        feat_tbl = Table(feat_data, colWidths=col_w_f, repeatRows=1, splitByRow=True)
+        feat_tbl.setStyle(_tbl_style(
+            header_bg=colors.HexColor("#4a148c"),
+            row_alt=colors.HexColor("#f5f0fb"),
+        ))
+        story.append(feat_tbl)
+        story.append(Paragraph(f"Total: {len(feat_rows)} células", st_caption))
+
+        # =====================================================================
+        # PIE DE PÁGINA via onPage callback
+        # =====================================================================
+        def _add_footer(canvas_obj, doc_obj):
+            canvas_obj.saveState()
+            canvas_obj.setFont("Helvetica", 7)
+            canvas_obj.setFillColor(colors.grey)
+            canvas_obj.drawString(MARGIN, 0.35 * inch,
+                                  "SmartCell AI Analysis Studio  —  Reporte generado automaticamente")
+            canvas_obj.drawRightString(
+                PAGE_W - MARGIN, 0.35 * inch,
+                f"Pagina {doc_obj.page}  |  {now_str}",
+            )
+            canvas_obj.restoreState()
+
+        doc.build(story, onFirstPage=_add_footer, onLaterPages=_add_footer)
 
     # =========================================================================
     # Zoom y pan
@@ -654,7 +922,115 @@ class App(tb.Window):
         else:
             self._draw_mock_view()
 
+    # =========================================================================
+    # Descarga automática de modelos
+    # =========================================================================
+    def _check_and_download_models(self):
+        """Verifica si los modelos existen; si no, ofrece descargarlos."""
+        import glob as _glob
+        missing = not (_glob.glob(_DETECTION_MODEL + "*") or os.path.isfile(_DETECTION_MODEL))
+        if not missing:
+            return
+
+        answer = messagebox.askyesno(
+            "Modelos no encontrados",
+            "El modelo de detección Cellpose no está descargado.\n\n"
+            "¿Deseas descargarlo ahora desde Google Drive?\n"
+            "(~1.2 GB — puede tardar varios minutos según tu conexión)",
+        )
+        if not answer:
+            self._set_status("Modelo no disponible — descarga pendiente")
+            return
+
+        self._run_model_download()
+
+    def _run_model_download(self):
+        """Muestra un diálogo con progreso real y descarga los modelos en background."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Descargando modelo…")
+        dlg.geometry("460x200")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # bloquear cierre manual
+
+        tb.Label(dlg, text="Descargando modelo Cellpose",
+                 font=("Segoe UI", 11, "bold")).pack(pady=(18, 2))
+        tb.Label(dlg, text="Esto solo ocurre una vez. No cierres la ventana.",
+                 bootstyle="secondary", font=("Segoe UI", 9)).pack()
+
+        pb_var = tk.DoubleVar(value=0)
+        pb = tb.Progressbar(dlg, variable=pb_var, maximum=100,
+                            bootstyle="primary", length=380)
+        pb.pack(pady=(12, 4))
+
+        pct_var  = tk.StringVar(value="0 %")
+        size_var = tk.StringVar(value="")
+        tb.Label(dlg, textvariable=pct_var,
+                 font=("Segoe UI", 10, "bold"), bootstyle="primary").pack()
+        tb.Label(dlg, textvariable=size_var,
+                 font=("Segoe UI", 8), bootstyle="secondary").pack(pady=(2, 0))
+
+        # Compartir estado entre threads via dict mutable
+        _state = {"total": 0, "downloaded": 0, "done": False, "ok": False, "err": ""}
+
+        def _poll_progress():
+            """Actualiza la barra cada 400 ms leyendo el tamaño del archivo parcial."""
+            if _state["done"]:
+                return
+            dest = os.path.join(_PROJECT_ROOT, "Models", "model_base_3B")
+            if os.path.isfile(dest):
+                downloaded = os.path.getsize(dest)
+                _state["downloaded"] = downloaded
+                total = _state["total"] or 1_220_000_000  # fallback 1.22 GB
+                pct = min(downloaded / total * 100, 99)
+                pb_var.set(pct)
+                pct_var.set(f"{pct:.1f} %")
+                mb_dl = downloaded / 1_048_576
+                mb_tot = total / 1_048_576
+                size_var.set(f"{mb_dl:.0f} MB  /  {mb_tot:.0f} MB")
+            self.after(400, _poll_progress)
+
+        def worker():
+            try:
+                import gdown
+                file_id = "1rJzPz5gvGkDMWkkba7f81Y5hVr6yeqkd"
+                url = f"https://drive.google.com/file/d/{file_id}/view?usp=drive_link"
+                dest = os.path.join(_PROJECT_ROOT, "Models", "model_base_3B")
+                result = gdown.download(url, output=dest, fuzzy=True,
+                                        quiet=True, resume=True)
+                _state["done"] = True
+                _state["ok"] = result is not None
+                if not _state["ok"]:
+                    _state["err"] = "gdown retornó None — archivo privado o ID incorrecto."
+            except Exception as e:
+                _state["done"] = True
+                _state["ok"] = False
+                _state["err"] = str(e)
+            self.after(0, _on_done)
+
+        def _on_done():
+            pb_var.set(100)
+            dlg.destroy()
+            if _state["ok"]:
+                messagebox.showinfo("Descarga completa",
+                                    "El modelo se descargó correctamente.\n"
+                                    "Ya puedes usar el botón Analizar.")
+                self._set_status("Modelo listo")
+            else:
+                messagebox.showerror(
+                    "Error de descarga",
+                    f"No se pudo descargar el modelo.\n\n{_state['err']}\n\n"
+                    "Alternativamente descárgalo manualmente desde:\n"
+                    "https://drive.google.com/file/d/1rJzPz5gvGkDMWkkba7f81Y5hVr6yeqkd/view\n"
+                    "y colócalo en la carpeta Models/ con el nombre model_base_3B",
+                )
+                self._set_status("Modelo no disponible")
+
+        self.after(400, _poll_progress)
+        threading.Thread(target=worker, daemon=True).start()
+
 
 if __name__ == "__main__":
     app = App()
+    app.after(500, app._check_and_download_models)
     app.mainloop()

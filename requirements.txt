@@ -8,3 +8,4 @@ ttkbootstrap
 Pillow
 reportlab
 pytest
+gdown>=5.1
