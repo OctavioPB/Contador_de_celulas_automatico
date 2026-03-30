@@ -1,0 +1,10 @@
+cellpose>=3.0
+torch>=2.0
+torchvision
+opencv-python
+scikit-image
+numpy
+ttkbootstrap
+Pillow
+reportlab
+pytest
