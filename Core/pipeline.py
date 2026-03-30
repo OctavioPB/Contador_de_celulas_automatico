@@ -65,6 +65,11 @@ class AnalysisResult:
     mean_area: float = 0.0
     std_area: float = 0.0
     cell_features: List[dict] = field(default_factory=list)  # regionprops por célula
+    angles_csv_path: Optional[str] = None    # ruta al CSV temporal de ángulos por ROI
+    preprocessing_metrics: dict = field(default_factory=dict)  # SNR y CV antes/después
+    p25_area: float = 0.0
+    p50_area: float = 0.0
+    p75_area: float = 0.0
     # Imágenes individuales para los tabs del visor
     img_original: Optional[np.ndarray] = None
     img_preprocessed: Optional[np.ndarray] = None
@@ -72,6 +77,7 @@ class AnalysisResult:
     img_cells: Optional[np.ndarray] = None
     img_area_hist: Optional[np.ndarray] = None
     img_orient_hist: Optional[np.ndarray] = None
+    img_boundary: Optional[np.ndarray] = None
 
 
 def run_analysis(
@@ -88,7 +94,10 @@ def run_analysis(
     logger.info(f"Células detectadas: {n_cells}")
 
     # 2. Preprocesado para visualización
+    gray_before = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img.copy()
+    gray_before = gray_before.astype(np.uint8)
     preprocessed = _preprocess(img)
+    preprocessing_metrics = _compute_quality_metrics(gray_before, preprocessed)
 
     if n_cells == 0:
         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -96,6 +105,7 @@ def run_analysis(
         return AnalysisResult(
             count=0, masks=[], angles=[], areas=[], feature_angles=[],
             overlay=img_bgr, report_figure=report,
+            preprocessing_metrics=preprocessing_metrics,
         )
 
     # 3. Máscaras individuales
@@ -107,16 +117,22 @@ def run_analysis(
     areas = [float(p.area) for p in props]
     cell_features = [
         {
-            "label":       p.label,
-            "area":        p.area,
-            "perimeter":   round(p.perimeter, 3),
-            "eccentricity": round(p.eccentricity, 4),
-            "solidity":    round(p.solidity, 4),
-            "major_axis":  round(p.major_axis_length, 4),
-            "minor_axis":  round(p.minor_axis_length, 4),
-            "orientation": round(math.degrees(p.orientation), 4),
-            "centroid_x":  round(p.centroid[1], 4),
-            "centroid_y":  round(p.centroid[0], 4),
+            "label":          p.label,
+            "area":           p.area,
+            "perimeter":      round(p.perimeter, 3),
+            "eccentricity":   round(p.eccentricity, 4),
+            "solidity":       round(p.solidity, 4),
+            "major_axis":     round(p.major_axis_length, 4),
+            "minor_axis":     round(p.minor_axis_length, 4),
+            "orientation":    round(math.degrees(p.orientation), 4),
+            "circularity":    round(
+                (4 * math.pi * p.area) / (p.perimeter ** 2)
+                if p.perimeter > 0 else 0.0,
+                4,
+            ),
+            "feret_diameter": round(p.feret_diameter_max, 4),
+            "centroid_x":     round(p.centroid[1], 4),
+            "centroid_y":     round(p.centroid[0], 4),
         }
         for p in props
     ]
@@ -124,8 +140,9 @@ def run_analysis(
     # 5. Orientación geométrica (desde features) para el histograma → [-90, 90)
     feature_angles = [_ellipse_angle_signed(m) for m in masks]
 
-    # 6. Orientación CNN (batch) para el overlay
-    cnn_angles, used_fallback = _estimate_orientations_batch(masks, orientation_model)
+    # 6. Orientación por ROI: CNN en batch + CSV temporal
+    cnn_angles, used_fallback = compute_angles_from_masks(masks, orientation_model)
+    angles_csv_path = _save_angles_csv(cnn_angles, feature_angles, used_fallback, areas)
 
     # 7. Overlay con contornos y vectores CNN
     overlay = _draw_overlay(img, masks, cnn_angles)
@@ -135,6 +152,7 @@ def run_analysis(
 
     mean_area = float(np.mean(areas)) if areas else 0.0
     std_area = float(np.std(areas)) if areas else 0.0
+    p25, p50, p75 = (np.percentile(areas, [25, 50, 75]) if areas else (0.0, 0.0, 0.0))
 
     # Imágenes individuales para los tabs del visor
     img_original = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -142,6 +160,7 @@ def run_analysis(
     flow_rgb = flows[0] if flows and len(flows) > 0 else preprocessed
     img_seg = cv2.cvtColor(flow_rgb, cv2.COLOR_RGB2BGR) if flow_rgb.ndim == 3 else cv2.cvtColor(flow_rgb, cv2.COLOR_GRAY2BGR)
     img_cells_bgr = cv2.cvtColor(_color_label_map(label_map), cv2.COLOR_RGB2BGR)
+    img_boundary = _draw_boundary_mask(img, label_map)
     img_area = _render_single_histogram(
         "Distribucion de Areas", "Area (pixeles)", areas, "#d9797a", bins=40
     )
@@ -157,17 +176,23 @@ def run_analysis(
         areas=areas,
         feature_angles=feature_angles,
         overlay=overlay,
+        angles_csv_path=angles_csv_path,
         report_figure=report,
         used_fallback=used_fallback,
         mean_area=mean_area,
         std_area=std_area,
         cell_features=cell_features,
+        preprocessing_metrics=preprocessing_metrics,
+        p25_area=float(p25),
+        p50_area=float(p50),
+        p75_area=float(p75),
         img_original=img_original,
         img_preprocessed=img_prep,
         img_segmentation=img_seg,
         img_cells=img_cells_bgr,
         img_area_hist=img_area,
         img_orient_hist=img_orient,
+        img_boundary=img_boundary,
     )
 
 
@@ -176,14 +201,38 @@ def run_analysis(
 # ---------------------------------------------------------------------------
 
 def _preprocess(img: np.ndarray) -> np.ndarray:
-    """Convierte a escala de grises y aplica CLAHE para realzar contraste."""
+    """Convierte a escala de grises, aplica filtro de ruido y CLAHE."""
     if img.ndim == 3:
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     else:
         gray = img.copy()
     gray = gray.astype(np.uint8)
+    # Filtro de ruido adaptativo según SNR
+    snr = float(np.mean(gray)) / (float(np.std(gray)) + 1e-6)
+    if snr < 5.0:
+        gray = cv2.bilateralFilter(gray, 9, 75, 75)
+    else:
+        gray = cv2.medianBlur(gray, 3)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     return clahe.apply(gray)
+
+
+def _compute_quality_metrics(before: np.ndarray, after: np.ndarray) -> dict:
+    """Calcula métricas de calidad de imagen antes y después del preprocesado.
+
+    Args:
+        before: Imagen uint8 original en escala de grises.
+        after:  Imagen uint8 tras el preprocesado.
+
+    Returns:
+        Dict con claves snr_before, snr_after, cv_before, cv_after.
+    """
+    return {
+        "snr_before": float(np.mean(before)) / (float(np.std(before)) + 1e-6),
+        "snr_after":  float(np.mean(after))  / (float(np.std(after))  + 1e-6),
+        "cv_before":  float(np.std(before))  / (float(np.mean(before)) + 1e-6),
+        "cv_after":   float(np.std(after))   / (float(np.mean(after))  + 1e-6),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +262,23 @@ def _ellipse_angle_signed(mask: np.ndarray) -> float:
 # Orientación CNN en batch
 # ---------------------------------------------------------------------------
 
-def _estimate_orientations_batch(masks: List[np.ndarray], model_path: str):
+def compute_angles_from_masks(
+    masks: List[np.ndarray], model_path: str
+) -> Tuple[List[float], List[bool]]:
+    """Calcula el ángulo de orientación para cada máscara ROI.
+
+    Para cada máscara en ``masks`` ejecuta la CNN de orientación en un único
+    batch forward pass. Si la CNN falla para una ROI concreta (norma nula o NaN)
+    se usa el fallback geométrico por elipse mínima.
+
+    Args:
+        masks:      Lista de arrays (H, W) uint8 — una máscara binaria por célula.
+        model_path: Ruta al checkpoint .pth de la CNN de orientación.
+
+    Returns:
+        angles:       Lista de ángulos en [0°, 180°), uno por máscara.
+        used_fallback: Lista de bool — True si esa ROI usó el fallback geométrico.
+    """
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -255,6 +320,89 @@ def _estimate_orientations_batch(masks: List[np.ndarray], model_path: str):
         angles.append(float(angle))
 
     return angles, used_fallback
+
+
+def _save_angles_csv(
+    cnn_angles: List[float],
+    feature_angles: List[float],
+    used_fallback: List[bool],
+    areas: List[float],
+) -> str:
+    """Genera un CSV con el ángulo de orientación por ROI y lo guarda en un
+    archivo temporal.  El archivo persiste hasta que el proceso termina o el
+    usuario lo descarga.
+
+    Columnas: roi, area_px, angle_cnn_deg, angle_feature_deg, method
+
+    Returns:
+        Ruta absoluta al archivo CSV temporal.
+    """
+    import csv
+    import tempfile
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", prefix="smartcell_angles_",
+        delete=False, newline="", encoding="utf-8",
+    )
+    writer = csv.writer(tmp)
+    writer.writerow(["roi", "area_px", "angle_cnn_deg", "angle_feature_deg", "method"])
+    for i, (cnn_a, feat_a, fb, area) in enumerate(
+        zip(cnn_angles, feature_angles, used_fallback, areas), 1
+    ):
+        writer.writerow([
+            i,
+            f"{area:.0f}",
+            f"{cnn_a:.4f}",
+            f"{feat_a:.4f}",
+            "ellipse_fallback" if fb else "CNN",
+        ])
+    tmp.close()
+    logger.info(f"CSV de ángulos guardado en: {tmp.name}")
+    return tmp.name
+
+
+# ---------------------------------------------------------------------------
+# Máscara delimitadora entre células (estilo watershed boundary)
+# ---------------------------------------------------------------------------
+
+def _draw_boundary_mask(img: np.ndarray, label_map: np.ndarray) -> np.ndarray:
+    """Dibuja los bordes entre células sobre la imagen original.
+
+    Usa skimage.segmentation.find_boundaries para detectar los píxeles
+    frontera entre etiquetas adyacentes. Los bordes se pintan en rojo oscuro
+    sobre la imagen original en escala de grises, reproduciendo el aspecto
+    de la imagen de referencia.
+
+    Args:
+        img:       Imagen original (H, W) o (H, W, 3) en formato RGB.
+        label_map: Array (H, W) int con etiquetas Cellpose (0 = fondo).
+
+    Returns:
+        Imagen BGR (H, W, 3) con los bordes delimitadores superpuestos.
+    """
+    from skimage.segmentation import find_boundaries
+
+    # Convertir imagen base a BGR gris
+    if img.ndim == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img.copy()
+    gray = gray.astype(np.uint8)
+
+    # Ecualizar contraste para mejorar visibilidad (igual que preprocesado)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # Convertir a BGR para poder pintar en color
+    out = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    # Encontrar bordes entre regiones etiquetadas (mode='thick' → bordes de 2px)
+    boundaries = find_boundaries(label_map, mode="thick", background=0)
+
+    # Pintar bordes en rojo oscuro (#8b1a1a) igual que en la imagen de referencia
+    out[boundaries] = (26, 26, 139)   # BGR de #8b1a1a (dark red)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
