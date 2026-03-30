@@ -121,3 +121,67 @@ def test_multiple_fibers(tmp_path):
     assert len(result.angles) == 3
     assert len(result.used_fallback) == 3
     assert result.used_fallback == [False, False, False]
+
+
+# =============================================================================
+# Tests de preprocesamiento (_preprocess)
+# =============================================================================
+
+def test_preprocess_normal_image():
+    """Test 1 — imagen normal: resultado uint8, misma forma, std > 0."""
+    from Core.pipeline import _preprocess
+
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 256, (128, 128), dtype=np.uint8)
+    result = _preprocess(img)
+
+    assert result.dtype == np.uint8
+    assert result.shape == (128, 128)
+    assert np.std(result) > 0
+
+
+def test_preprocess_dark_image():
+    """Test 2 — imagen muy oscura: CLAHE aumenta el brillo medio."""
+    from Core.pipeline import _preprocess
+
+    rng = np.random.default_rng(1)
+    img = rng.integers(0, 21, (128, 128), dtype=np.uint8)
+    result = _preprocess(img)
+
+    assert np.mean(result) > np.mean(img)
+
+
+def test_preprocess_bright_image():
+    """Test 3 — imagen muy brillante: salida uint8 válida sin excepción."""
+    from Core.pipeline import _preprocess
+
+    rng = np.random.default_rng(2)
+    img = rng.integers(235, 256, (128, 128), dtype=np.uint8)
+    result = _preprocess(img)
+
+    assert result.dtype == np.uint8
+    assert result.shape == (128, 128)
+
+
+def test_preprocess_noisy_image():
+    """Test 4 — imagen con ruido gaussiano alto: filtro reduce la desviación estándar."""
+    from Core.pipeline import _preprocess
+
+    rng = np.random.default_rng(3)
+    raw = rng.normal(128, 40, (128, 128))
+    img = np.clip(raw, 0, 255).astype(np.uint8)
+    result = _preprocess(img)
+
+    assert np.std(result) < np.std(img)
+
+
+def test_preprocess_rgb_image():
+    """Test 5 — imagen RGB de 3 canales: _preprocess la convierte a gris (2D)."""
+    from Core.pipeline import _preprocess
+
+    rng = np.random.default_rng(4)
+    img = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)
+    result = _preprocess(img)
+
+    assert result.ndim == 2
+    assert result.shape == (128, 128)
