@@ -9,7 +9,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -64,6 +64,14 @@ class AnalysisResult:
     used_fallback: List[bool] = field(default_factory=list)
     mean_area: float = 0.0
     std_area: float = 0.0
+    cell_features: List[dict] = field(default_factory=list)  # regionprops por célula
+    # Imágenes individuales para los tabs del visor
+    img_original: Optional[np.ndarray] = None
+    img_preprocessed: Optional[np.ndarray] = None
+    img_segmentation: Optional[np.ndarray] = None
+    img_cells: Optional[np.ndarray] = None
+    img_area_hist: Optional[np.ndarray] = None
+    img_orient_hist: Optional[np.ndarray] = None
 
 
 def run_analysis(
@@ -93,8 +101,25 @@ def run_analysis(
     # 3. Máscaras individuales
     masks = _label_map_to_masks(label_map)
 
-    # 4. Áreas
-    areas = [float(np.sum(m > 0)) for m in masks]
+    # 4. Áreas + features morfológicas (regionprops)
+    from skimage.measure import regionprops
+    props = regionprops(label_map)
+    areas = [float(p.area) for p in props]
+    cell_features = [
+        {
+            "label":       p.label,
+            "area":        p.area,
+            "perimeter":   round(p.perimeter, 3),
+            "eccentricity": round(p.eccentricity, 4),
+            "solidity":    round(p.solidity, 4),
+            "major_axis":  round(p.major_axis_length, 4),
+            "minor_axis":  round(p.minor_axis_length, 4),
+            "orientation": round(math.degrees(p.orientation), 4),
+            "centroid_x":  round(p.centroid[1], 4),
+            "centroid_y":  round(p.centroid[0], 4),
+        }
+        for p in props
+    ]
 
     # 5. Orientación geométrica (desde features) para el histograma → [-90, 90)
     feature_angles = [_ellipse_angle_signed(m) for m in masks]
@@ -111,6 +136,20 @@ def run_analysis(
     mean_area = float(np.mean(areas)) if areas else 0.0
     std_area = float(np.std(areas)) if areas else 0.0
 
+    # Imágenes individuales para los tabs del visor
+    img_original = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    img_prep = cv2.cvtColor(preprocessed, cv2.COLOR_GRAY2BGR)
+    flow_rgb = flows[0] if flows and len(flows) > 0 else preprocessed
+    img_seg = cv2.cvtColor(flow_rgb, cv2.COLOR_RGB2BGR) if flow_rgb.ndim == 3 else cv2.cvtColor(flow_rgb, cv2.COLOR_GRAY2BGR)
+    img_cells_bgr = cv2.cvtColor(_color_label_map(label_map), cv2.COLOR_RGB2BGR)
+    img_area = _render_single_histogram(
+        "Distribucion de Areas", "Area (pixeles)", areas, "#d9797a", bins=40
+    )
+    img_orient = _render_single_histogram(
+        "Orientacion de Celulas (desde features)", "Angulo (grados)",
+        feature_angles, "#d9797a", bins=36, range_=(-90, 90)
+    )
+
     return AnalysisResult(
         count=n_cells,
         masks=masks,
@@ -122,6 +161,13 @@ def run_analysis(
         used_fallback=used_fallback,
         mean_area=mean_area,
         std_area=std_area,
+        cell_features=cell_features,
+        img_original=img_original,
+        img_preprocessed=img_prep,
+        img_segmentation=img_seg,
+        img_cells=img_cells_bgr,
+        img_area_hist=img_area,
+        img_orient_hist=img_orient,
     )
 
 
@@ -259,6 +305,39 @@ def _color_label_map(label_map: np.ndarray) -> np.ndarray:
     return colored  # RGB
 
 
+def _render_single_histogram(
+    title: str, xlabel: str, data: List[float], color: str,
+    bins: int = 40, range_: Optional[Tuple] = None
+) -> np.ndarray:
+    """Renderiza un único histograma como imagen BGR."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=120)
+    fig.patch.set_facecolor("#eeeeee")
+    ax.set_facecolor("#e8e8e8")
+    if data:
+        kwargs: dict = dict(bins=bins, color=color, edgecolor="white", linewidth=0.5)
+        if range_:
+            kwargs["range"] = range_
+        ax.hist(data, **kwargs)
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_ylabel("Frecuencia", fontsize=11)
+    ax.grid(axis="y", color="white", linewidth=0.8, alpha=0.7)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    try:
+        buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(h, w, 3)
+    except AttributeError:
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
+    plt.close(fig)
+    return cv2.cvtColor(buf, cv2.COLOR_RGB2BGR)
+
+
 def _generate_report(
     img: np.ndarray,
     preprocessed: np.ndarray,
@@ -330,9 +409,14 @@ def _generate_report(
     plt.tight_layout(pad=2.0)
 
     fig.canvas.draw()
-    buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
     w, h = fig.canvas.get_width_height()
-    arr_rgb = buf.reshape(h, w, 3)
+    try:
+        buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        arr_rgb = buf.reshape(h, w, 3)
+    except AttributeError:
+        # matplotlib >= 3.8: usar buffer_rgba (RGBA → recortar canal A)
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        arr_rgb = buf.reshape(h, w, 4)[:, :, :3]
     plt.close(fig)
 
     return cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
