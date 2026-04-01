@@ -13,17 +13,16 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas as rl_canvas
 
 # ---------------------------------------------------------------------------
-# sys.path: subir 3 niveles desde app.py para llegar a la raiz del proyecto
+# sys.path: subir 1 nivel desde ui/app.py para llegar a la raiz del proyecto
 # ---------------------------------------------------------------------------
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_APP_DIR)))
+_PROJECT_ROOT = os.path.dirname(_APP_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-_DETECTION_MODEL = os.path.join(_PROJECT_ROOT, "Models", "model_base_3B")
+_DETECTION_MODEL = os.path.join(_PROJECT_ROOT, "models", "model_base_3B")
 _ORIENTATION_MODEL = os.path.join(
-    _PROJECT_ROOT, "Orientation", "Orientador_De_Fibras_CNN",
-    "models", "cnn_fiber_orientation.pth"
+    _PROJECT_ROOT, "orientation", "models", "cnn_fiber_orientation.pth"
 )
 
 APP_TITLE = "Smart Cell AI Analysis Studio (Beta)"
@@ -466,7 +465,7 @@ class App(tb.Window):
             messagebox.showerror(
                 "Modelo no encontrado",
                 f"No se encontro el modelo Cellpose en:\n{_DETECTION_MODEL}\n\n"
-                "Descargalo y coloca en la carpeta Models/.",
+                "Descargalo y coloca en la carpeta models/.",
             )
             return
 
@@ -477,7 +476,7 @@ class App(tb.Window):
 
         def worker():
             try:
-                from Core.pipeline import run_analysis
+                from core.pipeline import run_analysis
                 result = run_analysis(
                     self.current_image_path,
                     _DETECTION_MODEL,
@@ -1130,7 +1129,7 @@ class App(tb.Window):
                     f"No se pudo descargar el modelo.\n\n{_state['err']}\n\n"
                     "Alternativamente descárgalo manualmente desde:\n"
                     "https://drive.google.com/file/d/1rJzPz5gvGkDMWkkba7f81Y5hVr6yeqkd/view\n"
-                    "y colócalo en la carpeta Models/ con el nombre model_base_3B",
+                    "y colócalo en la carpeta models/ con el nombre model_base_3B",
                 )
                 self._set_status("Modelo no disponible")
 

@@ -1,7 +1,7 @@
 """Descarga automática de modelos desde Google Drive.
 
 Uso:
-    python Models/download_models.py
+    python models/download_models.py
 
 O se invoca automáticamente al arrancar la app si los modelos no existen.
 Edita MODELS_REGISTRY para añadir o cambiar modelos.
@@ -43,7 +43,7 @@ def ensure_models(registry: dict = None, models_dir: str = None, silent: bool = 
 
     Args:
         registry:   Diccionario {nombre: (drive_id_o_url, tamaño)}. Por defecto MODELS_REGISTRY.
-        models_dir: Directorio donde guardar. Por defecto la carpeta Models/.
+        models_dir: Directorio donde guardar. Por defecto la carpeta models/.
         silent:     Si True, no imprime progreso (útil cuando se llama desde la UI con diálogo propio).
     """
     try:

@@ -18,15 +18,14 @@ import numpy as np
 # Rutas de módulos
 # ---------------------------------------------------------------------------
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_ORIENT_DIR = os.path.join(_ROOT, "Orientation", "Orientador_De_Fibras_CNN")
+_ORIENT_DIR = os.path.join(_ROOT, "orientation")
 
-for _p in (_ROOT, _ORIENT_DIR):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import importlib.util as _ilu
 
-from Detection.detector import run_cellpose, _label_map_to_masks  # noqa: E402
+from detection.detector import run_cellpose, _label_map_to_masks  # noqa: E402
 
 _cnn_spec = _ilu.spec_from_file_location(
     "orient_cnn", os.path.join(_ORIENT_DIR, "model", "cnn.py")
