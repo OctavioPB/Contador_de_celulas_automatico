@@ -1,8 +1,12 @@
-# Modelos (demasiado grandes para GitHub — se descargan via Models/download_models.py)
-Models/model_base_3B*
-Models/*.pth
-Models/*.pt
-Models/*.bin
+# Claude Code
+CLAUDE.md
+**/CLAUDE.md
+
+# Modelos (demasiado grandes para GitHub — se descargan via models/download_models.py)
+models/model_base_3B*
+models/*.pth
+models/*.pt
+models/*.bin
 
 # Python
 __pycache__/
