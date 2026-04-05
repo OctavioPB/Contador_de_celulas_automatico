@@ -483,9 +483,10 @@ class App(tb.Window):
                     _ORIENTATION_MODEL,
                 )
                 self.after(0, lambda: self._on_analysis_complete(result))
-            except Exception as e:
+            except Exception:
                 import traceback
-                self.after(0, lambda: self._on_analysis_error(traceback.format_exc()))
+                tb = traceback.format_exc()
+                self.after(0, lambda: self._on_analysis_error(tb))
 
         threading.Thread(target=worker, daemon=True).start()
 
