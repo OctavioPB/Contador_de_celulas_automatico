@@ -71,6 +71,7 @@ class App(tb.Window):
         self._tv_features = None
         self._analyze_btn = None
         self._angles_csv_btn = None
+        self._train_btn = None
 
         self.root = tb.Frame(self, padding=10)
         self.root.pack(fill=BOTH, expand=True)
@@ -222,6 +223,11 @@ class App(tb.Window):
         ).pack(fill=X, pady=(4, 0))
 
         # Botones de accion
+        self._train_btn = tb.Button(
+            content, text="Entrenar Modelo de Orientacion",
+            bootstyle="primary", command=self.train_orientation_model,
+        )
+        self._train_btn.pack(fill=X, ipady=6, pady=(0, 6))
         self._analyze_btn = tb.Button(
             content, text="Analizar", bootstyle="primary",
             command=self.analyze,
@@ -483,9 +489,10 @@ class App(tb.Window):
                     _ORIENTATION_MODEL,
                 )
                 self.after(0, lambda: self._on_analysis_complete(result))
-            except Exception as e:
+            except Exception:
                 import traceback
-                self.after(0, lambda: self._on_analysis_error(traceback.format_exc()))
+                tb = traceback.format_exc()
+                self.after(0, lambda: self._on_analysis_error(tb))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -572,6 +579,99 @@ class App(tb.Window):
         self._set_status("Error durante el analisis")
         if self._analyze_btn:
             self._analyze_btn.configure(state="normal")
+
+    # =========================================================================
+    # Entrenamiento del modelo de orientacion
+    # =========================================================================
+    def train_orientation_model(self):
+        """Abre dialogo de parametros y entrena la CNN de orientacion en un thread."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Entrenar Modelo de Orientacion")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        pad = {"padx": 12, "pady": 6}
+        tb.Label(dialog, text="Epocas:", font=("Segoe UI", 10)).grid(row=0, column=0, sticky=W, **pad)
+        epochs_var = tk.IntVar(value=50)
+        tb.Entry(dialog, textvariable=epochs_var, width=10).grid(row=0, column=1, **pad)
+
+        tb.Label(dialog, text="Muestras por epoca:", font=("Segoe UI", 10)).grid(row=1, column=0, sticky=W, **pad)
+        samples_var = tk.IntVar(value=10000)
+        tb.Entry(dialog, textvariable=samples_var, width=10).grid(row=1, column=1, **pad)
+
+        save_path = _ORIENTATION_MODEL
+
+        def start():
+            try:
+                epochs = epochs_var.get()
+                samples = samples_var.get()
+                if epochs < 1 or samples < 100:
+                    messagebox.showwarning("Valores invalidos", "Epocas >= 1, muestras >= 100.", parent=dialog)
+                    return
+            except tk.TclError:
+                messagebox.showwarning("Valores invalidos", "Ingresa numeros enteros.", parent=dialog)
+                return
+
+            dialog.destroy()
+            self._set_status("Entrenando modelo de orientacion...")
+            self._progress_bar.start(10)
+            if self._train_btn:
+                self._train_btn.configure(state="disabled")
+            if self._analyze_btn:
+                self._analyze_btn.configure(state="disabled")
+
+            def worker():
+                import sys as _sys
+                _orient_dir = os.path.join(_PROJECT_ROOT, "orientation")
+                if _orient_dir not in _sys.path:
+                    _sys.path.insert(0, _orient_dir)
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                from training.train import train
+                history = train(
+                    n_epochs=epochs,
+                    n_samples_per_epoch=samples,
+                    save_path=save_path,
+                )
+                best_mae = min(history["val_mae"])
+                self.after(0, lambda: self._on_train_complete(best_mae))
+
+            def worker_safe():
+                try:
+                    worker()
+                except Exception:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    self.after(0, lambda: self._on_train_error(tb_str))
+
+            threading.Thread(target=worker_safe, daemon=True).start()
+
+        btn_frame = tb.Frame(dialog)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(8, 12))
+        tb.Button(btn_frame, text="Cancelar", bootstyle="secondary",
+                  command=dialog.destroy).pack(side=LEFT, padx=6)
+        tb.Button(btn_frame, text="Entrenar", bootstyle="warning",
+                  command=start).pack(side=LEFT, padx=6)
+
+    def _on_train_complete(self, best_mae: float):
+        self._progress_bar.stop()
+        if self._train_btn:
+            self._train_btn.configure(state="normal")
+        if self._analyze_btn:
+            self._analyze_btn.configure(state="normal")
+        self._set_status(f"Modelo entrenado — Mejor MAE: {best_mae:.2f}°")
+        messagebox.showinfo(
+            "Entrenamiento completado",
+            f"Modelo guardado en:\n{_ORIENTATION_MODEL}\n\nMejor Val MAE: {best_mae:.2f}°",
+        )
+
+    def _on_train_error(self, message: str):
+        self._progress_bar.stop()
+        if self._train_btn:
+            self._train_btn.configure(state="normal")
+        if self._analyze_btn:
+            self._analyze_btn.configure(state="normal")
+        messagebox.showerror("Error en el entrenamiento", message)
+        self._set_status("Error durante el entrenamiento")
 
     def save_processed_image(self):
         if self._last_result is None:
