@@ -79,7 +79,7 @@ def _resolve_model_path(model_path: str) -> str:
     if not candidates:
         raise FileNotFoundError(
             f"No se encontró modelo '{basename}' en '{folder}'. "
-            "Verifica que el archivo exista en Models/."
+            "Verifica que el archivo exista en models/."
         )
     return max(candidates, key=os.path.getctime)
 

@@ -13,29 +13,29 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas as rl_canvas
 
 # ---------------------------------------------------------------------------
-# sys.path: subir 3 niveles desde app.py para llegar a la raiz del proyecto
+# sys.path: subir 1 nivel desde ui/app.py para llegar a la raiz del proyecto
 # ---------------------------------------------------------------------------
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_APP_DIR)))
+_PROJECT_ROOT = os.path.dirname(_APP_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-_DETECTION_MODEL = os.path.join(_PROJECT_ROOT, "Models", "model_base_3B")
+_DETECTION_MODEL = os.path.join(_PROJECT_ROOT, "models", "model_base_3B")
 _ORIENTATION_MODEL = os.path.join(
-    _PROJECT_ROOT, "Orientation", "Orientador_De_Fibras_CNN",
-    "models", "cnn_fiber_orientation.pth"
+    _PROJECT_ROOT, "orientation", "models", "cnn_fiber_orientation.pth"
 )
 
 APP_TITLE = "Smart Cell AI Analysis Studio (Beta)"
 
-# Definicion de los 7 tabs del visor de imagen
+# Definicion de los 8 tabs del visor de imagen
 _IMG_TABS = [
     ("original",  "1 Original"),
     ("prep",      "2 Prep."),
     ("seg",       "3 Segm."),
     ("cells",     "4 Celulas"),
-    ("areas",     "5 Areas"),
-    ("orient",    "6 Orient."),
+    ("boundary",  "5 Limites"),
+    ("areas",     "6 Areas"),
+    ("orient",    "7 Orient."),
     ("all",       "Todas"),
 ]
 
@@ -70,6 +70,8 @@ class App(tb.Window):
         self._tv_detail = None
         self._tv_features = None
         self._analyze_btn = None
+        self._angles_csv_btn = None
+        self._train_btn = None
 
         self.root = tb.Frame(self, padding=10)
         self.root.pack(fill=BOTH, expand=True)
@@ -206,8 +208,12 @@ class App(tb.Window):
 
         # Tab 4: Features
         _FEAT_COLS = ("label", "area", "perimeter", "eccentricity", "solidity",
-                      "major_axis", "minor_axis", "orientation", "centroid_x", "centroid_y")
-        _FEAT_WIDTHS = (45, 60, 75, 90, 70, 80, 80, 85, 80, 80)
+                      "major_axis", "minor_axis", "orientation",
+                      "circularity", "feret_diameter",
+                      "centroid_x", "centroid_y")
+        _FEAT_WIDTHS = (45, 60, 75, 90, 70, 80, 80, 85,
+                        80, 90,
+                        80, 80)
         tab_features = tb.Frame(self._results_nb, padding=4)
         self._results_nb.add(tab_features, text=" Features ")
         self._tv_features = self._make_bidir_treeview(tab_features, _FEAT_COLS, _FEAT_WIDTHS)
@@ -217,13 +223,29 @@ class App(tb.Window):
         ).pack(fill=X, pady=(4, 0))
 
         # Botones de accion
+        self._train_btn = tb.Button(
+            content, text="Entrenar Modelo de Orientacion",
+            bootstyle="primary", command=self.train_orientation_model,
+        )
+        self._train_btn.pack(fill=X, ipady=6, pady=(0, 6))
         self._analyze_btn = tb.Button(
             content, text="Analizar", bootstyle="primary",
             command=self.analyze,
         )
         self._analyze_btn.pack(fill=X, ipady=6, pady=(0, 6))
+        self._progress_bar = tb.Progressbar(
+            content, mode="indeterminate", bootstyle="primary"
+        )
+        self._progress_bar.pack(fill=X, pady=(0, 6))
+        self._angles_csv_btn = tb.Button(
+            content, text="Descargar CSV de Angulos", bootstyle="success",
+            command=self.download_angles_csv, state="disabled",
+        )
+        self._angles_csv_btn.pack(fill=X, ipady=4, pady=(0, 6))
         tb.Button(content, text="Guardar Analisis", bootstyle="secondary",
                   command=self.save_analysis).pack(fill=X, ipady=4, pady=(0, 6))
+        tb.Button(content, text="Guardar Imagen Procesada", bootstyle="secondary",
+                  command=self.save_processed_image).pack(fill=X, ipady=4, pady=(0, 6))
         tb.Button(content, text="Exportar a PDF", bootstyle="secondary",
                   command=self.export_pdf).pack(fill=X, ipady=4)
 
@@ -232,11 +254,23 @@ class App(tb.Window):
             "total_cells": tk.StringVar(value="—"),
             "mean_area":   tk.StringVar(value="—"),
             "std_area":    tk.StringVar(value="—"),
+            "snr_before":  tk.StringVar(value="—"),
+            "snr_after":   tk.StringVar(value="—"),
+            "cv_after":    tk.StringVar(value="—"),
+            "p25_area":    tk.StringVar(value="—"),
+            "p50_area":    tk.StringVar(value="—"),
+            "p75_area":    tk.StringVar(value="—"),
         }
         rows = [
             ("Total celulas",          "total_cells"),
             ("Area media (px)",        "mean_area"),
             ("Desv. estandar (px)",    "std_area"),
+            ("SNR antes preprocesar",   "snr_before"),
+            ("SNR despues preprocesar", "snr_after"),
+            ("CV intensidad (post)",    "cv_after"),
+            ("P25 area (px)",           "p25_area"),
+            ("Mediana area (px)",       "p50_area"),
+            ("P75 area (px)",           "p75_area"),
         ]
         for i, (label, key) in enumerate(rows):
             tb.Label(parent, text=label,
@@ -314,6 +348,7 @@ class App(tb.Window):
             "prep":     self._last_result.img_preprocessed,
             "seg":      self._last_result.img_segmentation,
             "cells":    self._last_result.img_cells,
+            "boundary": self._last_result.img_boundary,
             "areas":    self._last_result.img_area_hist,
             "orient":   self._last_result.img_orient_hist,
             "all":      self._last_result.report_figure,
@@ -436,26 +471,28 @@ class App(tb.Window):
             messagebox.showerror(
                 "Modelo no encontrado",
                 f"No se encontro el modelo Cellpose en:\n{_DETECTION_MODEL}\n\n"
-                "Descargalo y coloca en la carpeta Models/.",
+                "Descargalo y coloca en la carpeta models/.",
             )
             return
 
         self._set_status("Analizando... (puede tardar varios segundos)")
         if self._analyze_btn:
             self._analyze_btn.configure(state="disabled")
+        self._progress_bar.start(10)
 
         def worker():
             try:
-                from Core.pipeline import run_analysis
+                from core.pipeline import run_analysis
                 result = run_analysis(
                     self.current_image_path,
                     _DETECTION_MODEL,
                     _ORIENTATION_MODEL,
                 )
                 self.after(0, lambda: self._on_analysis_complete(result))
-            except Exception as e:
+            except Exception:
                 import traceback
-                self.after(0, lambda: self._on_analysis_error(traceback.format_exc()))
+                tb = traceback.format_exc()
+                self.after(0, lambda: self._on_analysis_error(tb))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -469,6 +506,13 @@ class App(tb.Window):
         self._summary_vars["total_cells"].set(str(result.count))
         self._summary_vars["mean_area"].set(f"{result.mean_area:.1f}")
         self._summary_vars["std_area"].set(f"{result.std_area:.1f}")
+        pm = result.preprocessing_metrics
+        self._summary_vars["snr_before"].set(f"{pm.get('snr_before', 0):.2f}")
+        self._summary_vars["snr_after"].set(f"{pm.get('snr_after', 0):.2f}")
+        self._summary_vars["cv_after"].set(f"{pm.get('cv_after', 0):.4f}")
+        self._summary_vars["p25_area"].set(f"{result.p25_area:.1f}")
+        self._summary_vars["p50_area"].set(f"{result.p50_area:.1f}")
+        self._summary_vars["p75_area"].set(f"{result.p75_area:.1f}")
         if hasattr(self, "_summary_hint"):
             self._summary_hint.configure(text="")
 
@@ -509,6 +553,8 @@ class App(tb.Window):
                     f"{feat['major_axis']:.4f}",
                     f"{feat['minor_axis']:.4f}",
                     f"{feat['orientation']:.4f}",
+                    f"{feat['circularity']:.4f}",
+                    f"{feat['feret_diameter']:.4f}",
                     f"{feat['centroid_x']:.4f}",
                     f"{feat['centroid_y']:.4f}",
                 ),
@@ -517,15 +563,146 @@ class App(tb.Window):
         # Cache de texto para guardar/exportar
         self._analysis_cache = self._build_text_report(result)
 
+        # Activar botón de descarga de CSV de ángulos si el archivo existe
+        if self._angles_csv_btn:
+            has_csv = bool(result.angles_csv_path and os.path.isfile(result.angles_csv_path))
+            self._angles_csv_btn.configure(state="normal" if has_csv else "disabled")
+
+        self._progress_bar.stop()
         self._set_status(f"Listo  —  {result.count} celulas detectadas")
         if self._analyze_btn:
             self._analyze_btn.configure(state="normal")
 
     def _on_analysis_error(self, message: str):
+        self._progress_bar.stop()
         messagebox.showerror("Error en el analisis", message)
         self._set_status("Error durante el analisis")
         if self._analyze_btn:
             self._analyze_btn.configure(state="normal")
+
+    # =========================================================================
+    # Entrenamiento del modelo de orientacion
+    # =========================================================================
+    def train_orientation_model(self):
+        """Abre dialogo de parametros y entrena la CNN de orientacion en un thread."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Entrenar Modelo de Orientacion")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        pad = {"padx": 12, "pady": 6}
+        tb.Label(dialog, text="Epocas:", font=("Segoe UI", 10)).grid(row=0, column=0, sticky=W, **pad)
+        epochs_var = tk.IntVar(value=50)
+        tb.Entry(dialog, textvariable=epochs_var, width=10).grid(row=0, column=1, **pad)
+
+        tb.Label(dialog, text="Muestras por epoca:", font=("Segoe UI", 10)).grid(row=1, column=0, sticky=W, **pad)
+        samples_var = tk.IntVar(value=10000)
+        tb.Entry(dialog, textvariable=samples_var, width=10).grid(row=1, column=1, **pad)
+
+        save_path = _ORIENTATION_MODEL
+
+        def start():
+            try:
+                epochs = epochs_var.get()
+                samples = samples_var.get()
+                if epochs < 1 or samples < 100:
+                    messagebox.showwarning("Valores invalidos", "Epocas >= 1, muestras >= 100.", parent=dialog)
+                    return
+            except tk.TclError:
+                messagebox.showwarning("Valores invalidos", "Ingresa numeros enteros.", parent=dialog)
+                return
+
+            dialog.destroy()
+            self._set_status("Entrenando modelo de orientacion...")
+            self._progress_bar.start(10)
+            if self._train_btn:
+                self._train_btn.configure(state="disabled")
+            if self._analyze_btn:
+                self._analyze_btn.configure(state="disabled")
+
+            def worker():
+                import sys as _sys
+                _orient_dir = os.path.join(_PROJECT_ROOT, "orientation")
+                if _orient_dir not in _sys.path:
+                    _sys.path.insert(0, _orient_dir)
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                from training.train import train
+                history = train(
+                    n_epochs=epochs,
+                    n_samples_per_epoch=samples,
+                    save_path=save_path,
+                )
+                best_mae = min(history["val_mae"])
+                self.after(0, lambda: self._on_train_complete(best_mae))
+
+            def worker_safe():
+                try:
+                    worker()
+                except Exception:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    self.after(0, lambda: self._on_train_error(tb_str))
+
+            threading.Thread(target=worker_safe, daemon=True).start()
+
+        btn_frame = tb.Frame(dialog)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(8, 12))
+        tb.Button(btn_frame, text="Cancelar", bootstyle="secondary",
+                  command=dialog.destroy).pack(side=LEFT, padx=6)
+        tb.Button(btn_frame, text="Entrenar", bootstyle="warning",
+                  command=start).pack(side=LEFT, padx=6)
+
+    def _on_train_complete(self, best_mae: float):
+        self._progress_bar.stop()
+        if self._train_btn:
+            self._train_btn.configure(state="normal")
+        if self._analyze_btn:
+            self._analyze_btn.configure(state="normal")
+        self._set_status(f"Modelo entrenado — Mejor MAE: {best_mae:.2f}°")
+        messagebox.showinfo(
+            "Entrenamiento completado",
+            f"Modelo guardado en:\n{_ORIENTATION_MODEL}\n\nMejor Val MAE: {best_mae:.2f}°",
+        )
+
+    def _on_train_error(self, message: str):
+        self._progress_bar.stop()
+        if self._train_btn:
+            self._train_btn.configure(state="normal")
+        if self._analyze_btn:
+            self._analyze_btn.configure(state="normal")
+        messagebox.showerror("Error en el entrenamiento", message)
+        self._set_status("Error durante el entrenamiento")
+
+    def save_processed_image(self):
+        if self._last_result is None:
+            messagebox.showwarning("Sin datos", "Ejecuta el analisis primero.")
+            return
+        img_map = {
+            "original":  self._last_result.img_original,
+            "prep":      self._last_result.img_preprocessed,
+            "seg":       self._last_result.img_segmentation,
+            "cells":     self._last_result.img_cells,
+            "boundary":  self._last_result.img_boundary,
+            "areas":     self._last_result.img_area_hist,
+            "orient":    self._last_result.img_orient_hist,
+            "all":       self._last_result.report_figure,
+        }
+        img = img_map.get(self._active_img_tab)
+        if img is None:
+            messagebox.showwarning("Sin imagen", "No hay imagen en el tab activo.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Guardar imagen procesada",
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("TIFF", "*.tif"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            cv2.imwrite(path, img)
+            messagebox.showinfo("Guardado", f"Imagen guardada en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error al guardar", str(e))
 
     def _set_status(self, text: str):
         self.title(f"{APP_TITLE}  —  {text}")
@@ -560,6 +737,32 @@ class App(tb.Window):
     # =========================================================================
     # Guardar y exportar
     # =========================================================================
+    def download_angles_csv(self):
+        """Copia el CSV temporal de ángulos por ROI a la ubicación elegida por el usuario."""
+        import shutil
+        if self._last_result is None or not self._last_result.angles_csv_path:
+            messagebox.showwarning("Sin datos", "Ejecuta el analisis primero.")
+            return
+        src = self._last_result.angles_csv_path
+        if not os.path.isfile(src):
+            messagebox.showerror("Archivo no encontrado",
+                                 "El CSV temporal ya no existe. Vuelve a ejecutar el analisis.")
+            return
+        img_stem = os.path.splitext(os.path.basename(self.current_image_path or "resultado"))[0]
+        path = filedialog.asksaveasfilename(
+            title="Guardar CSV de angulos por ROI",
+            initialfile=f"{img_stem}_angulos.csv",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            shutil.copy2(src, path)
+            messagebox.showinfo("Guardado", f"CSV guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error al guardar", str(e))
+
     def _export_treeview_csv(self, tv, default_name: str):
         import csv
         cols = tv["columns"]
@@ -822,7 +1025,9 @@ class App(tb.Window):
         ))
 
         feat_header = ["#", "Área", "Perímetro", "Excentr.", "Solidez",
-                       "Eje Mayor", "Eje Menor", "Orient. (°)", "Centroide X", "Centroide Y"]
+                       "Eje Mayor", "Eje Menor", "Orient. (°)",
+                       "Circularidad", "Diám. Feret",
+                       "Centroide X", "Centroide Y"]
         feat_rows = [
             [
                 str(f["label"]),
@@ -833,13 +1038,15 @@ class App(tb.Window):
                 f"{f['major_axis']:.2f}",
                 f"{f['minor_axis']:.2f}",
                 f"{f['orientation']:.2f}",
+                f"{f['circularity']:.4f}",
+                f"{f['feret_diameter']:.4f}",
                 f"{f['centroid_x']:.2f}",
                 f"{f['centroid_y']:.2f}",
             ]
             for f in result.cell_features
         ]
         feat_data = [feat_header] + feat_rows
-        col_w_f = [USABLE_W / 10] * 10
+        col_w_f = [USABLE_W / 12] * 12
         feat_tbl = Table(feat_data, colWidths=col_w_f, repeatRows=1, splitByRow=True)
         feat_tbl.setStyle(_tbl_style(
             header_bg=colors.HexColor("#4a148c"),
@@ -1022,7 +1229,7 @@ class App(tb.Window):
                     f"No se pudo descargar el modelo.\n\n{_state['err']}\n\n"
                     "Alternativamente descárgalo manualmente desde:\n"
                     "https://drive.google.com/file/d/1rJzPz5gvGkDMWkkba7f81Y5hVr6yeqkd/view\n"
-                    "y colócalo en la carpeta Models/ con el nombre model_base_3B",
+                    "y colócalo en la carpeta models/ con el nombre model_base_3B",
                 )
                 self._set_status("Modelo no disponible")
 

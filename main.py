@@ -13,13 +13,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 # Lanzar la UI
-_APP_PATH = os.path.join(
-    _ROOT,
-    "UI",
-    "UNIR_SmartCellAnalyzer_python-main",
-    "UNIR_SmartCellAnalyzer_python-main",
-    "app.py",
-)
+_APP_PATH = os.path.join(_ROOT, "ui", "app.py")
 
 if not os.path.exists(_APP_PATH):
     print(f"Error: No se encontró app.py en {_APP_PATH}")
